@@ -49,6 +49,8 @@
  *                    ...
  *                ...
  *            WGPEER_A_PROTOCOL_VERSION: NLA_U32
+ *            WGPEER_A_PQC: NLA_U8, 1 if peer requires post-quantum
+ *                          handshakes, 0 otherwise (default)
  *        0: NLA_NESTED
  *            ...
  *        ...
@@ -83,6 +85,10 @@
  *    WGDEVICE_A_PRIVATE_KEY: len WG_KEY_LEN, all zeros to remove
  *    WGDEVICE_A_LISTEN_PORT: NLA_U16, 0 to choose randomly
  *    WGDEVICE_A_FWMARK: NLA_U32, 0 to disable
+ *    WGDEVICE_A_PQC_PRIVATE_KEY: NLA_BINARY, variable length. Forwarded to
+ *                                the PQC extension module for storage. All
+ *                                zeros to remove. Requires a PQC extension
+ *                                to be loaded.
  *    WGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            WGPEER_A_PUBLIC_KEY: len WG_KEY_LEN
@@ -115,6 +121,15 @@
  *                                       most recent protocol will be used when
  *                                       this is unset. Otherwise, must be set
  *                                       to 1.
+ *            WGPEER_A_PQC: NLA_U8, set to 1 to require post-quantum
+ *                          handshakes for this peer, 0 to disable. When
+ *                          enabled, classical Type 1/2 handshakes from this
+ *                          peer are rejected (downgrade prevention). Requires
+ *                          a PQC extension module to be loaded.
+ *            WGPEER_A_PQC_KEY: NLA_BINARY, variable length. The peer's PQC
+ *                              public key. Forwarded to the PQC extension
+ *                              module for storage and validation. The format
+ *                              and size depend on the loaded PQC extension.
  *        0: NLA_NESTED
  *            ...
  *        ...
@@ -161,6 +176,8 @@ enum wgdevice_attribute {
 	WGDEVICE_A_LISTEN_PORT,
 	WGDEVICE_A_FWMARK,
 	WGDEVICE_A_PEERS,
+	WGDEVICE_A_PQC_PRIVATE_KEY,
+	WGDEVICE_A_PQC_PUBLIC_KEY,
 	__WGDEVICE_A_LAST
 };
 #define WGDEVICE_A_MAX (__WGDEVICE_A_LAST - 1)
@@ -184,6 +201,8 @@ enum wgpeer_attribute {
 	WGPEER_A_TX_BYTES,
 	WGPEER_A_ALLOWEDIPS,
 	WGPEER_A_PROTOCOL_VERSION,
+	WGPEER_A_PQC,
+	WGPEER_A_PQC_KEY,
 	__WGPEER_A_LAST
 };
 #define WGPEER_A_MAX (__WGPEER_A_LAST - 1)

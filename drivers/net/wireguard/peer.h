@@ -64,6 +64,8 @@ struct wg_peer {
 	struct list_head allowedips_list;
 	struct napi_struct napi;
 	u64 internal_id;
+	bool pqc_enabled;
+	void *pqc_data;		/* opaque, owned by PQC extension module */
 };
 
 struct wg_peer *wg_peer_create(struct wg_device *wg,

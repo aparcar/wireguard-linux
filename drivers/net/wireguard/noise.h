@@ -83,6 +83,10 @@ struct noise_handshake {
 	u8 latest_timestamp[NOISE_TIMESTAMP_LEN];
 	__le32 remote_index;
 
+	/* PQC ephemeral scratch — allocated per handshake, zeroed on clear */
+	void *pqc_scratch;
+	u32 pqc_scratch_len;
+
 	/* Protects all members except the immutable (after noise_handshake_
 	 * init): remote_static, precomputed_static_static, static_identity.
 	 */

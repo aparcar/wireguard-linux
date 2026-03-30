@@ -83,6 +83,13 @@ static void handshake_zero(struct noise_handshake *handshake)
 	memset(&handshake->chaining_key, 0, NOISE_HASH_LEN);
 	handshake->remote_index = 0;
 	handshake->state = HANDSHAKE_ZEROED;
+	if (handshake->pqc_scratch) {
+		memzero_explicit(handshake->pqc_scratch,
+				 handshake->pqc_scratch_len);
+		kfree(handshake->pqc_scratch);
+		handshake->pqc_scratch = NULL;
+		handshake->pqc_scratch_len = 0;
+	}
 }
 
 void wg_noise_handshake_clear(struct noise_handshake *handshake)
@@ -859,3 +866,63 @@ out:
 	up_write(&handshake->lock);
 	return ret;
 }
+
+/*
+ * Exported Noise primitive wrappers for PQC extension modules.
+ * These allow external modules to evolve the Noise symmetric state
+ * without direct access to the noise_handshake struct layout.
+ */
+
+void wg_noise_hs_mix_hash(struct noise_handshake *hs,
+			   const u8 *data, u32 len)
+{
+	mix_hash(hs->hash, data, len);
+}
+EXPORT_SYMBOL(wg_noise_hs_mix_hash);
+
+void wg_noise_hs_mix_key(struct noise_handshake *hs,
+			  const u8 *data, u32 len)
+{
+	kdf(hs->chaining_key, NULL, NULL, data,
+	    NOISE_HASH_LEN, 0, 0, len, hs->chaining_key);
+}
+EXPORT_SYMBOL(wg_noise_hs_mix_key);
+
+void wg_noise_hs_kdf2(struct noise_handshake *hs, u8 key[NOISE_SYMMETRIC_KEY_LEN],
+		       const u8 *input, u32 input_len)
+{
+	kdf(hs->chaining_key, key, NULL, input,
+	    NOISE_HASH_LEN, NOISE_SYMMETRIC_KEY_LEN, 0,
+	    input_len, hs->chaining_key);
+}
+EXPORT_SYMBOL(wg_noise_hs_kdf2);
+
+void wg_noise_hs_encrypt_and_hash(struct noise_handshake *hs,
+				   u8 *ct, const u8 *pt, u32 pt_len,
+				   u8 key[NOISE_SYMMETRIC_KEY_LEN])
+{
+	message_encrypt(ct, pt, pt_len, key, hs->hash);
+}
+EXPORT_SYMBOL(wg_noise_hs_encrypt_and_hash);
+
+bool wg_noise_hs_decrypt_and_hash(struct noise_handshake *hs,
+				   u8 *pt, const u8 *ct, u32 ct_len,
+				   u8 key[NOISE_SYMMETRIC_KEY_LEN])
+{
+	return message_decrypt(pt, ct, ct_len, key, hs->hash);
+}
+EXPORT_SYMBOL(wg_noise_hs_decrypt_and_hash);
+
+void *wg_noise_hs_get_scratch(struct noise_handshake *hs)
+{
+	return hs->pqc_scratch;
+}
+EXPORT_SYMBOL(wg_noise_hs_get_scratch);
+
+void wg_noise_hs_set_scratch(struct noise_handshake *hs,
+			      void *scratch, u32 len)
+{
+	hs->pqc_scratch = scratch;
+	hs->pqc_scratch_len = len;
+}
+EXPORT_SYMBOL(wg_noise_hs_set_scratch);

@@ -1,4 +1,5 @@
 ccflags-y := -D'pr_fmt(fmt)=KBUILD_MODNAME ": " fmt'
+LINUXINCLUDE := -I$(src)/uapi-override $(LINUXINCLUDE)
 ccflags-$(CONFIG_WIREGUARD_DEBUG) += -DDEBUG
 wireguard-y := main.o
 wireguard-y += noise.o
@@ -14,4 +15,5 @@ wireguard-y += allowedips.o
 wireguard-y += ratelimiter.o
 wireguard-y += cookie.o
 wireguard-y += netlink.o
+wireguard-y += pqc.o
 obj-$(CONFIG_WIREGUARD) := wireguard.o

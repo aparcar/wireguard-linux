@@ -125,4 +125,29 @@ enum message_alignments {
 
 enum { HANDSHAKE_DSCP = 0x88 /* AF41, plus 00 ECN */ };
 
+/* PQC extension: flag bit in the reserved bytes of message_header.
+ * Wire bytes: [type, reserved0, reserved1, reserved2]
+ * Bit 0 of reserved0 indicates PQC payload follows classical fields.
+ *
+ * Classical initiation: le32 = 0x00000001 (type=1)
+ * PQC initiation:       le32 = 0x00000101 (type=1, pqc flag set)
+ * Classical response:   le32 = 0x00000002 (type=2)
+ * PQC response:         le32 = 0x00000102 (type=2, pqc flag set)
+ *
+ * Existing WireGuard checks exact le32 equality, so PQC messages
+ * are silently dropped by implementations that don't support them.
+ */
+#define WG_PQC_FLAG		cpu_to_le32(0x00000100)
+#define WG_MSG_IS_PQC(type)	((type) & WG_PQC_FLAG)
+#define WG_MSG_BASE_TYPE(type)	((type) & cpu_to_le32(0x000000FF))
+
+/* Classical section sizes (excluding MACs) */
+#define WG_CLASSICAL_INITIATION_LEN \
+	(sizeof(struct message_handshake_initiation) - sizeof(struct message_macs))
+#define WG_CLASSICAL_RESPONSE_LEN \
+	(sizeof(struct message_handshake_response) - sizeof(struct message_macs))
+
+/* Maximum PQ payload size — keeps total under IPv6 UDP max (1452 bytes) */
+#define WG_PQC_MAX_PAYLOAD	1360
+
 #endif /* _WG_MESSAGES_H */

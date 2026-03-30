@@ -9,6 +9,7 @@
 #include "socket.h"
 #include "queueing.h"
 #include "messages.h"
+#include "pqc.h"
 
 #include <uapi/linux/wireguard.h>
 
@@ -27,7 +28,9 @@ static const struct nla_policy device_policy[WGDEVICE_A_MAX + 1] = {
 	[WGDEVICE_A_FLAGS]		= NLA_POLICY_MASK(NLA_U32, __WGDEVICE_F_ALL),
 	[WGDEVICE_A_LISTEN_PORT]	= { .type = NLA_U16 },
 	[WGDEVICE_A_FWMARK]		= { .type = NLA_U32 },
-	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED }
+	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED },
+	[WGDEVICE_A_PQC_PRIVATE_KEY]	= { .type = NLA_NUL_STRING, .len = PATH_MAX - 1 },
+	[WGDEVICE_A_PQC_PUBLIC_KEY]	= { .type = NLA_NUL_STRING, .len = PATH_MAX - 1 }
 };
 
 static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
@@ -40,7 +43,9 @@ static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
 	[WGPEER_A_RX_BYTES]				= { .type = NLA_U64 },
 	[WGPEER_A_TX_BYTES]				= { .type = NLA_U64 },
 	[WGPEER_A_ALLOWEDIPS]				= { .type = NLA_NESTED },
-	[WGPEER_A_PROTOCOL_VERSION]			= { .type = NLA_U32 }
+	[WGPEER_A_PROTOCOL_VERSION]			= { .type = NLA_U32 },
+	[WGPEER_A_PQC]					= { .type = NLA_U8 },
+	[WGPEER_A_PQC_KEY]				= { .type = NLA_NUL_STRING, .len = PATH_MAX - 1 }
 };
 
 static const struct nla_policy allowedip_policy[WGALLOWEDIP_A_MAX + 1] = {
@@ -143,8 +148,20 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 				      WGPEER_A_UNSPEC) ||
 		    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES, peer->rx_bytes,
 				      WGPEER_A_UNSPEC) ||
-		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
+		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1) ||
+		    nla_put_u8(skb, WGPEER_A_PQC,
+			       peer->pqc_enabled ? 1 : 0))
 			goto err;
+
+		/* Forward PQC get to extension module */
+		if (static_branch_unlikely(&wg_pqc_enabled) &&
+		    peer->pqc_enabled) {
+			struct wg_pqc_ops *ops = rcu_dereference(wg_pqc_current);
+			if (ops && ops->nl_get_peer) {
+				if (ops->nl_get_peer(peer, skb))
+					goto err;
+			}
+		}
 
 		read_lock_bh(&peer->endpoint_lock);
 		if (peer->endpoint.addr.sa_family == AF_INET)
@@ -489,6 +506,28 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 			wg_packet_send_keepalive(peer);
 	}
 
+	if (attrs[WGPEER_A_PQC])
+		peer->pqc_enabled = !!nla_get_u8(attrs[WGPEER_A_PQC]);
+
+	/* PQC peer key: pass file path to extension module */
+	if (attrs[WGPEER_A_PQC_KEY]) {
+		if (!static_branch_unlikely(&wg_pqc_enabled)) {
+			ret = -ENOENT;
+			goto out;
+		}
+		{
+			struct wg_pqc_ops *ops = rcu_dereference(wg_pqc_current);
+			const char *path = nla_data(attrs[WGPEER_A_PQC_KEY]);
+
+			if (ops && ops->set_peer_key_from_path)
+				ret = ops->set_peer_key_from_path(peer, path);
+			else
+				ret = -ENOENT;
+			if (ret)
+				goto out;
+		}
+	}
+
 	if (netif_running(wg->dev))
 		wg_packet_send_staged_packets(peer);
 
@@ -586,6 +625,28 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 		up_write(&wg->static_identity.lock);
 	}
 skip_set_private_key:
+
+	/* PQC device keys: pass file paths to the PQC extension module,
+	 * which reads the key files directly from the filesystem. */
+	if (info->attrs[WGDEVICE_A_PQC_PRIVATE_KEY] &&
+	    info->attrs[WGDEVICE_A_PQC_PUBLIC_KEY]) {
+		if (!static_branch_unlikely(&wg_pqc_enabled)) {
+			ret = -ENOENT;
+			goto out;
+		}
+		{
+			struct wg_pqc_ops *ops = rcu_dereference(wg_pqc_current);
+			const char *sk_path = nla_data(info->attrs[WGDEVICE_A_PQC_PRIVATE_KEY]);
+			const char *pk_path = nla_data(info->attrs[WGDEVICE_A_PQC_PUBLIC_KEY]);
+
+			if (ops && ops->set_device_keys_from_path)
+				ret = ops->set_device_keys_from_path(wg, sk_path, pk_path);
+			else
+				ret = -ENOENT;
+			if (ret)
+				goto out;
+		}
+	}
 
 	if (info->attrs[WGDEVICE_A_PEERS]) {
 		struct nlattr *attr, *peer[WGPEER_A_MAX + 1];

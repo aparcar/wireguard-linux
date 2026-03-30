@@ -9,6 +9,7 @@
 #include "timers.h"
 #include "peerlookup.h"
 #include "noise.h"
+#include "pqc.h"
 
 #include <linux/kref.h>
 #include <linux/lockdep.h>
@@ -79,6 +80,14 @@ struct wg_peer *wg_peer_get_maybe_zero(struct wg_peer *peer)
 
 static void peer_make_dead(struct wg_peer *peer)
 {
+	/* Let PQC extension clean up per-peer data */
+	if (static_branch_unlikely(&wg_pqc_enabled) && peer->pqc_data) {
+		struct wg_pqc_ops *ops = rcu_dereference(wg_pqc_current);
+		if (ops && ops->peer_remove)
+			ops->peer_remove(peer);
+		peer->pqc_data = NULL;
+	}
+
 	/* Remove from configuration-time lookup structures. */
 	list_del_init(&peer->peer_list);
 	wg_allowedips_remove_by_peer(&peer->device->peer_allowedips, peer,

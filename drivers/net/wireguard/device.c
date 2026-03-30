@@ -10,6 +10,7 @@
 #include "ratelimiter.h"
 #include "peer.h"
 #include "messages.h"
+#include "pqc.h"
 
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
@@ -261,6 +262,13 @@ static void wg_destruct(struct net_device *dev)
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
 	wg_ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(wg->static_identity));
+	/* Let PQC extension clean up per-device data */
+	if (static_branch_unlikely(&wg_pqc_enabled) && wg->pqc_device_data) {
+		struct wg_pqc_ops *ops = rcu_dereference(wg_pqc_current);
+		if (ops && ops->device_remove)
+			ops->device_remove(wg);
+		wg->pqc_device_data = NULL;
+	}
 	kvfree(wg->index_hashtable);
 	kvfree(wg->peer_hashtable);
 	mutex_unlock(&wg->device_update_lock);

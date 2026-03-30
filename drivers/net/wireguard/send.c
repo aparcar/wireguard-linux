@@ -10,6 +10,7 @@
 #include "socket.h"
 #include "messages.h"
 #include "cookie.h"
+#include "pqc.h"
 
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
@@ -27,6 +28,12 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 		return; /* This function is rate limited. */
 
 	atomic64_set(&peer->last_sent_handshake, ktime_get_coarse_boottime_ns());
+
+	/* PQC path: if peer has PQC enabled and extension is loaded */
+	if (static_branch_unlikely(&wg_pqc_enabled) && peer->pqc_enabled) {
+		wg_pqc_send_handshake_initiation(peer);
+		return;
+	}
 	net_dbg_ratelimited("%s: Sending handshake initiation to peer %llu (%pISpfsc)\n",
 			    peer->device->dev->name, peer->internal_id,
 			    &peer->endpoint.addr);
@@ -85,6 +92,12 @@ out:
 void wg_packet_send_handshake_response(struct wg_peer *peer)
 {
 	struct message_handshake_response packet;
+
+	/* PQC path: if peer has PQC enabled and extension is loaded */
+	if (static_branch_unlikely(&wg_pqc_enabled) && peer->pqc_enabled) {
+		wg_pqc_send_handshake_response(peer);
+		return;
+	}
 
 	atomic64_set(&peer->last_sent_handshake, ktime_get_coarse_boottime_ns());
 	net_dbg_ratelimited("%s: Sending handshake response to peer %llu (%pISpfsc)\n",

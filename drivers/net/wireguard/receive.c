@@ -10,6 +10,7 @@
 #include "messages.h"
 #include "cookie.h"
 #include "socket.h"
+#include "pqc.h"
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -41,6 +42,18 @@ static size_t validate_header_len(struct sk_buff *skb)
 	if (SKB_TYPE_LE32(skb) == cpu_to_le32(MESSAGE_HANDSHAKE_COOKIE) &&
 	    skb->len == sizeof(struct message_handshake_cookie))
 		return sizeof(struct message_handshake_cookie);
+	/* PQC messages: classical type with PQC flag bit set */
+	if (static_branch_unlikely(&wg_pqc_enabled) &&
+	    WG_MSG_IS_PQC(SKB_TYPE_LE32(skb))) {
+		__le32 base = WG_MSG_BASE_TYPE(SKB_TYPE_LE32(skb));
+
+		if (base == cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION) &&
+		    skb->len == wg_pqc_init_msg_len)
+			return wg_pqc_init_msg_len;
+		if (base == cpu_to_le32(MESSAGE_HANDSHAKE_RESPONSE) &&
+		    skb->len == wg_pqc_resp_msg_len)
+			return wg_pqc_resp_msg_len;
+	}
 	return 0;
 }
 
@@ -131,6 +144,58 @@ static void wg_receive_handshake_packet(struct wg_device *wg,
 		return;
 	}
 
+	/* PQC messages: classical type with PQC flag bit set in reserved byte */
+	if (static_branch_unlikely(&wg_pqc_enabled) &&
+	    WG_MSG_IS_PQC(SKB_TYPE_LE32(skb))) {
+		__le32 base = WG_MSG_BASE_TYPE(SKB_TYPE_LE32(skb));
+
+		if (base == cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION)) {
+			if (packet_needs_cookie) {
+				wg_packet_send_handshake_cookie(wg, skb,
+					((struct message_handshake_initiation *)
+					 skb->data)->sender_index);
+				return;
+			}
+			peer = wg_pqc_consume_initiation(wg, skb);
+			if (unlikely(!peer)) {
+				net_dbg_skb_ratelimited("%s: Invalid PQC handshake initiation from %pISpfsc\n",
+							wg->dev->name, skb);
+				return;
+			}
+			wg_socket_set_peer_endpoint_from_skb(peer, skb);
+			net_dbg_ratelimited("%s: Receiving PQC handshake initiation from peer %llu (%pISpfsc)\n",
+					    wg->dev->name, peer->internal_id,
+					    &peer->endpoint.addr);
+			wg_pqc_send_handshake_response(peer);
+		} else if (base == cpu_to_le32(MESSAGE_HANDSHAKE_RESPONSE)) {
+			if (packet_needs_cookie) {
+				wg_packet_send_handshake_cookie(wg, skb,
+					((struct message_handshake_response *)
+					 skb->data)->sender_index);
+				return;
+			}
+			peer = wg_pqc_consume_response(wg, skb);
+			if (unlikely(!peer)) {
+				net_dbg_skb_ratelimited("%s: Invalid PQC handshake response from %pISpfsc\n",
+							wg->dev->name, skb);
+				return;
+			}
+			wg_socket_set_peer_endpoint_from_skb(peer, skb);
+			net_dbg_ratelimited("%s: Receiving PQC handshake response from peer %llu (%pISpfsc)\n",
+					    wg->dev->name, peer->internal_id,
+					    &peer->endpoint.addr);
+			if (wg_noise_handshake_begin_session(&peer->handshake,
+							     &peer->keypairs)) {
+				wg_timers_session_derived(peer);
+				wg_timers_handshake_complete(peer);
+				wg_packet_send_keepalive(peer);
+			}
+		} else {
+			return;
+		}
+		goto out_pqc;
+	}
+
 	switch (SKB_TYPE_LE32(skb)) {
 	case cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION): {
 		struct message_handshake_initiation *message =
@@ -145,6 +210,14 @@ static void wg_receive_handshake_packet(struct wg_device *wg,
 		if (unlikely(!peer)) {
 			net_dbg_skb_ratelimited("%s: Invalid handshake initiation from %pISpfsc\n",
 						wg->dev->name, skb);
+			return;
+		}
+		/* Downgrade prevention: reject classical from PQC-enabled peer */
+		if (static_branch_unlikely(&wg_pqc_enabled) &&
+		    peer->pqc_enabled) {
+			net_dbg_ratelimited("%s: Rejecting classical initiation from PQC peer %llu\n",
+					    wg->dev->name, peer->internal_id);
+			wg_peer_put(peer);
 			return;
 		}
 		wg_socket_set_peer_endpoint_from_skb(peer, skb);
@@ -169,6 +242,14 @@ static void wg_receive_handshake_packet(struct wg_device *wg,
 						wg->dev->name, skb);
 			return;
 		}
+		/* Downgrade prevention: reject classical from PQC-enabled peer */
+		if (static_branch_unlikely(&wg_pqc_enabled) &&
+		    peer->pqc_enabled) {
+			net_dbg_ratelimited("%s: Rejecting classical response from PQC peer %llu\n",
+					    wg->dev->name, peer->internal_id);
+			wg_peer_put(peer);
+			return;
+		}
 		wg_socket_set_peer_endpoint_from_skb(peer, skb);
 		net_dbg_ratelimited("%s: Receiving handshake response from peer %llu (%pISpfsc)\n",
 				    wg->dev->name, peer->internal_id,
@@ -188,6 +269,8 @@ static void wg_receive_handshake_packet(struct wg_device *wg,
 		break;
 	}
 	}
+
+out_pqc:
 
 	if (unlikely(!peer)) {
 		WARN(1, "Somehow a wrong type of packet wound up in the handshake queue!\n");
@@ -546,7 +629,10 @@ void wg_packet_receive(struct wg_device *wg, struct sk_buff *skb)
 	switch (SKB_TYPE_LE32(skb)) {
 	case cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION):
 	case cpu_to_le32(MESSAGE_HANDSHAKE_RESPONSE):
-	case cpu_to_le32(MESSAGE_HANDSHAKE_COOKIE): {
+	case cpu_to_le32(MESSAGE_HANDSHAKE_COOKIE):
+	case cpu_to_le32(MESSAGE_HANDSHAKE_INITIATION) | WG_PQC_FLAG:
+	case cpu_to_le32(MESSAGE_HANDSHAKE_RESPONSE) | WG_PQC_FLAG:
+	{
 		int cpu, ret = -EBUSY;
 
 		if (unlikely(!rng_is_initialized()))
